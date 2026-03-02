@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { generateCopy, formatForChannel } from "./tools/copywriter.js";
+import { tools, executeTool } from "./tools/copywriter.js";
 
 const client = new Anthropic();
 
@@ -13,7 +13,7 @@ const SYSTEM_PROMPT = `당신은 마케팅 전문 AI 에이전트입니다.
 원칙:
 - 사실에 기반하지 않은 과장 표현 금지
 - 경쟁사 비방 금지
-- "세계 최고", "100% 보장" 같은 과대광고 금지
+- 과대광고 금지
 - 채널별 글자수 제한 준수
 
 도구를 활용해 사용자의 마케팅 요청을 처리하세요.`;
@@ -21,20 +21,49 @@ const SYSTEM_PROMPT = `당신은 마케팅 전문 AI 에이전트입니다.
 export async function runAgent(userMessage: string): Promise<void> {
   console.log(`\n사용자: ${userMessage}\n`);
 
-  const runner = client.beta.messages.toolRunner({
-    model: "claude-opus-4-6",
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
-    tools: [generateCopy, formatForChannel],
-    messages: [{ role: "user", content: userMessage }],
-  });
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: userMessage },
+  ];
 
-  for await (const message of runner) {
-    for (const block of message.content) {
-      if (block.type === "text" && block.text) {
+  while (true) {
+    const response = await client.messages.create({
+      model: "claude-opus-4-6",
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      tools,
+      messages,
+    });
+
+    for (const block of response.content) {
+      if (block.type === "text") {
         process.stdout.write(block.text);
       }
     }
+
+    if (response.stop_reason === "end_turn") {
+      break;
+    }
+
+    if (response.stop_reason === "tool_use") {
+      messages.push({ role: "assistant", content: response.content });
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of response.content) {
+        if (block.type === "tool_use") {
+          const result = executeTool(block.name, block.input);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result,
+          });
+        }
+      }
+
+      messages.push({ role: "user", content: toolResults });
+      continue;
+    }
+
+    break;
   }
 
   console.log("\n");
